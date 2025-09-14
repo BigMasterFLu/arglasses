@@ -12,10 +12,18 @@ class FingerTracker:
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=2,
-            min_detection_confidence=0.7,
-            min_tracking_confidence=0.5
+            min_detection_confidence=0.2,  # Even lower threshold for better performance
+            min_tracking_confidence=0.2,   # Lower tracking threshold
+            model_complexity=0            # Use fastest model (0 is fastest, 1 is balanced, 2 is most accurate)
         )
+        # FPS calculation variables
+        self.fps_start_time = 0
+        self.fps = 0
+        self.frame_count = 0
         self.mp_draw = mp.solutions.drawing_utils
+        # Key press tracking
+        self.pressed_keys = {}  # Dictionary to store pressed keys and their timestamps
+        self.key_press_delay = 1.0  # Delay in seconds between key presses
         self.finger_names = {
             4: "THUMB",
             8: "INDEX",
@@ -65,19 +73,69 @@ class FingerTracker:
         else:
             self.left_pinch = distance < 0.05
             
+    def __init_thumbs_up_state(self):
+        if not hasattr(self, '_last_thumbs_up_time'):
+            self._last_thumbs_up_time = 0
+        if not hasattr(self, '_thumbs_up_active'):
+            self._thumbs_up_active = False
+        if not hasattr(self, '_thumbs_up_start_time'):
+            self._thumbs_up_start_time = 0
+        if not hasattr(self, '_showing_thumbs_up'):
+            self._showing_thumbs_up = False
+
     def check_thumbs_up(self, hand_landmarks):
+        self.__init_thumbs_up_state()
+        
         # Get relevant landmarks
         thumb_tip = hand_landmarks.landmark[4]
+        thumb_ip = hand_landmarks.landmark[3]
         thumb_mcp = hand_landmarks.landmark[2]
+        wrist = hand_landmarks.landmark[0]
+        
+        # Get positions for all finger tips and joints
         index_tip = hand_landmarks.landmark[8]
+        middle_tip = hand_landmarks.landmark[12]
+        ring_tip = hand_landmarks.landmark[16]
+        pinky_tip = hand_landmarks.landmark[20]
         
-        # Check if thumb is pointing up (y position is significantly above MCP)
-        thumb_up = thumb_mcp.y - thumb_tip.y > 0.15
+        index_pip = hand_landmarks.landmark[6]
+        middle_pip = hand_landmarks.landmark[10]
+        ring_pip = hand_landmarks.landmark[14]
+        pinky_pip = hand_landmarks.landmark[18]
         
-        # Check if other fingers are folded (using index finger as example)
-        other_fingers_folded = thumb_tip.y - index_tip.y < 0.1
+        # Simplified thumb up check
+        thumb_up = (thumb_mcp.y - thumb_tip.y > 0.08 and  # Reduced threshold for upward pointing
+                   abs(thumb_tip.x - thumb_mcp.x) < 0.15)  # More tolerance for vertical alignment
         
-        return thumb_up and other_fingers_folded
+        # Simplified fingers folded check
+        fingers_folded = (
+            index_tip.y > (index_pip.y - 0.02) and
+            middle_tip.y > (middle_pip.y - 0.02) and
+            ring_tip.y > (ring_pip.y - 0.02) and
+            pinky_tip.y > (pinky_pip.y - 0.02)
+        )
+        
+        current_time = cv2.getTickCount() / cv2.getTickFrequency()
+        
+        # Track thumbs up gesture duration
+        if thumb_up and fingers_folded:
+            if not self._showing_thumbs_up:
+                self._thumbs_up_start_time = current_time
+                self._showing_thumbs_up = True
+                if current_time - self._last_thumbs_up_time > 0.3:  # Reduced delay
+                    self._last_thumbs_up_time = current_time
+                    return True
+        else:
+            if self._showing_thumbs_up:
+                self._showing_thumbs_up = False
+        
+        return False
+        
+    def get_thumbs_up_duration(self):
+        if self._showing_thumbs_up:
+            current_time = cv2.getTickCount() / cv2.getTickFrequency()
+            return current_time - self._thumbs_up_start_time
+        return 0
         
     def check_key_press(self, point):
         if not self.key_positions:
@@ -96,6 +154,12 @@ class FingerTracker:
         # Clear the overlay and key positions
         self.keyboard_overlay.fill(0)
         self.key_positions.clear()
+        
+        # Ensure valid dimensions
+        width = right_pos[0] - left_pos[0]
+        height = right_pos[1] - left_pos[1]
+        if width < 50 or height < 50:  # Minimum size check
+            return self.keyboard_overlay if self.keyboard_visible else None
         
         # Create a semi-transparent blue keyboard
         keyboard_points = np.array([
@@ -153,11 +217,31 @@ class FingerTracker:
                 key = keyboard_layout[row][col]
                 self.key_positions[key] = (x, y, key_width, key_height)
                 
+                # Check if key was recently pressed
+                current_time = cv2.getTickCount() / cv2.getTickFrequency()
+                key_dark = False
+                if key in self.pressed_keys:
+                    time_since_press = current_time - self.pressed_keys[key]
+                    if time_since_press < 1.0:  # Darken effect lasts for 1 second
+                        key_dark = True
+                        # Create darker background for pressed key
+                        key_rect = np.array([
+                            [x, y],
+                            [x + key_width, y],
+                            [x + key_width, y + key_height],
+                            [x, y + key_height]
+                        ], np.int32)
+                        cv2.fillPoly(self.keyboard_overlay, [key_rect], (50, 30, 0))  # Darker blue
+                    else:
+                        # Remove old key presses
+                        del self.pressed_keys[key]
+
                 # Draw key text
                 text_x = x + (key_width // 3)
                 text_y = y + (key_height * 2 // 3)
+                text_color = (150, 150, 150) if key_dark else font_color  # Dimmer text when key is dark
                 cv2.putText(self.keyboard_overlay, key, 
-                          (text_x, text_y), font, font_scale, font_color, font_thickness)
+                          (text_x, text_y), font, font_scale, text_color, font_thickness)
         
         # Add lock status indicator
         lock_text = "LOCKED" if self.keyboard_locked else "UNLOCKED"
@@ -190,8 +274,8 @@ class FingerTracker:
                     frame, 
                     hand_landmarks, 
                     self.mp_hands.HAND_CONNECTIONS,
-                    self.mp_draw.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2),
-                    self.mp_draw.DrawingSpec(color=(0, 0, 255), thickness=2)
+                    self.mp_draw.DrawingSpec(color=(255, 255, 255), thickness=2, circle_radius=2),  # White dots
+                    self.mp_draw.DrawingSpec(color=(255, 255, 255), thickness=2)  # White lines
                 )
                 
                 # Get frame dimensions
@@ -233,30 +317,54 @@ class FingerTracker:
             
             # Check for keyboard creation if not locked
             if not self.keyboard_locked and self.left_pinch and self.right_pinch and left_hand_pos and right_hand_pos:
-                # Create the keyboard overlay
-                self.keyboard_overlay = self.create_keyboard_overlay(frame.shape, left_hand_pos, right_hand_pos)
-                # Blend the overlay with the frame
-                frame = cv2.addWeighted(frame, 0.7, self.keyboard_overlay, 0.3, 0)
-                self.keyboard_visible = True
+                # Validate hand positions
+                if (abs(right_hand_pos[0] - left_hand_pos[0]) < frame.shape[1] and 
+                    abs(right_hand_pos[1] - left_hand_pos[1]) < frame.shape[0] and
+                    right_hand_pos[0] > left_hand_pos[0]):  # Ensure right hand is on the right
+                    try:
+                        self.keyboard_overlay = self.create_keyboard_overlay(frame.shape, left_hand_pos, right_hand_pos)
+                        if self.keyboard_overlay is not None:
+                            # Only update keyboard state if creation was successful
+                            self.keyboard_visible = True
+                            # Blend the overlay with the frame
+                            frame = cv2.addWeighted(frame, 0.7, self.keyboard_overlay, 0.3, 0)
+                    except Exception as e:
+                        print(f"Error creating keyboard: {e}")
+                        self.keyboard_visible = False
+                        self.keyboard_overlay = None
+                        self.last_keyboard_points = None
             # Keep the keyboard visible if it exists
-            elif self.keyboard_visible and self.keyboard_overlay is not None:
-                frame = cv2.addWeighted(frame, 0.7, self.keyboard_overlay, 0.3, 0)
+            elif self.keyboard_visible and self.keyboard_overlay is not None and self.last_keyboard_points is not None:
+                try:
+                    # Use the last known good keyboard position
+                    left_pos = (self.last_keyboard_points[0][0], self.last_keyboard_points[0][1])
+                    right_pos = (self.last_keyboard_points[2][0], self.last_keyboard_points[2][1])
+                    frame = cv2.addWeighted(frame, 0.7, self.keyboard_overlay, 0.3, 0)
+                except Exception as e:
+                    print(f"Error displaying keyboard: {e}")
+                    # If there's an error, reset keyboard state
+                    self.keyboard_visible = False
+                    self.keyboard_overlay = None
+                    self.last_keyboard_points = None
                 
-            # Check for thumbs up to lock/unlock keyboard
-            for hand_landmarks in results.multi_hand_landmarks:
-                if self.check_thumbs_up(hand_landmarks):
+            # Check for thumbs up to lock/unlock keyboard - only check the first detected hand
+            if results.multi_hand_landmarks and len(results.multi_hand_landmarks) > 0:
+                if self.check_thumbs_up(results.multi_hand_landmarks[0]):
                     self.keyboard_locked = not self.keyboard_locked
-                    if self.keyboard_overlay is not None:
-                        # Refresh keyboard overlay to update lock status
+                    if self.keyboard_overlay is not None and self.last_keyboard_points is not None:
+                        # Get the correct points for keyboard recreation
+                        left_pos = (self.last_keyboard_points[0][0], self.last_keyboard_points[0][1])
+                        right_pos = (self.last_keyboard_points[2][0], self.last_keyboard_points[2][1])  # Use correct coordinates
+                        
+                        # Create keyboard with correct dimensions
                         self.keyboard_overlay = self.create_keyboard_overlay(
-                            frame.shape, 
-                            self.last_keyboard_points[0], 
-                            self.last_keyboard_points[1]
+                            frame.shape,
+                            left_pos,
+                            right_pos
                         )
-                    break
                     
-            # Check for key presses if keyboard is visible
-            if self.keyboard_visible and not self.right_pinch and not self.left_pinch:
+            # Check for key presses if keyboard is visible and locked
+            if self.keyboard_visible and self.keyboard_locked and not self.right_pinch and not self.left_pinch:
                 for hand_landmarks in results.multi_hand_landmarks:
                     index_tip = hand_landmarks.landmark[8]
                     h, w, _ = frame.shape
@@ -265,19 +373,42 @@ class FingerTracker:
                     # Check if index finger is touching a key
                     key = self.check_key_press(index_point)
                     if key:
-                        # Simulate key press
-                        pyautogui.press(key.lower())
+                        current_time = cv2.getTickCount() / cv2.getTickFrequency()
+                        # Check if enough time has passed since last press of this key
+                        can_press = True
+                        if key in self.pressed_keys:
+                            time_since_press = current_time - self.pressed_keys[key]
+                            if time_since_press < self.key_press_delay:
+                                can_press = False
+                        
+                        if can_press:
+                            # Store the press time
+                            self.pressed_keys[key] = current_time
+                            # Simulate key press
+                            pyautogui.press(key.lower())
         
         return frame
 
     def run(self):
         cap = cv2.VideoCapture(0)
         
+        # Set camera properties for 60 FPS
+        cap.set(cv2.CAP_PROP_FPS, 60)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))  # Use MJPG for better performance
+        
         # Set the window size
         cv2.namedWindow('Finger Tracking', cv2.WINDOW_NORMAL)
-        cv2.resizeWindow('Finger Tracking', 1300, 800)
+        cv2.resizeWindow('Finger Tracking', 2560, 1440)
+        
+        # Variables for FPS control
+        fps_target = 60.0
+        frame_time = 1.0 / fps_target
         
         while True:
+            frame_start = cv2.getTickCount()
+            
             success, frame = cap.read()
             if not success:
                 print("Failed to grab frame")
@@ -294,11 +425,40 @@ class FingerTracker:
                 overlay = self.keyboard_overlay
                 processed_frame = cv2.addWeighted(processed_frame, 0.7, overlay, 0.3, 0)
             
+            # Calculate and display FPS
+            self.frame_count += 1
+            if self.frame_count >= 30:  # Update FPS every 30 frames
+                current_time = cv2.getTickCount()
+                if self.fps_start_time:
+                    self.fps = 30.0 / ((current_time - self.fps_start_time) / cv2.getTickFrequency())
+                self.fps_start_time = current_time
+                self.frame_count = 0
+            
+            # Draw FPS counter
+            cv2.putText(processed_frame, f'FPS: {self.fps:.1f}',
+                       (processed_frame.shape[1] - 150, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            
+            # Draw thumbs up duration if active
+            if self._showing_thumbs_up:
+                duration = self.get_thumbs_up_duration()
+                if duration >= 10:
+                    message = "Thumbs up held for 10+ seconds!"
+                else:
+                    message = f"Thumbs up: {duration:.1f}s"
+                cv2.putText(processed_frame, message,
+                          (processed_frame.shape[1] - 400, 70),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            
             # Display the frame
             cv2.imshow('Finger Tracking', processed_frame)
             
+            # Control frame rate
+            frame_time_elapsed = (cv2.getTickCount() - frame_start) / cv2.getTickFrequency()
+            wait_time = max(1, int((frame_time - frame_time_elapsed) * 1000))
+            
             # Break the loop if 'q' is pressed
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            if cv2.waitKey(wait_time) & 0xFF == ord('q'):
                 break
         
         cap.release()
