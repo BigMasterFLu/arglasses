@@ -1,0 +1,34 @@
+# Hand Tracking Virtual Keyboard Requirements
+# Core dependencies for MediaPipe hand tracking with virtual keyboard
+
+# Computer Vision and MediaPipe
+opencv-contrib-python==4.10.0.84
+mediapipe==0.10.21
+
+# Numerical computing
+numpy==1.26.0
+
+# GUI automation for virtual keyboard
+PyAutoGUI==0.9.54
+
+# TensorFlow (required by MediaPipe)
+tensorflow==2.13.1
+
+# Additional dependencies for MediaPipe and TensorFlow
+absl-py==2.3.1
+attrs==25.3.0
+protobuf==4.25.8
+flatbuffers==25.2.10
+
+# JAX (required by newer MediaPipe)
+jax==0.7.1
+jaxlib==0.7.1
+
+# Audio support for MediaPipe
+sounddevice==0.5.2
+
+# ML data types
+ml_dtypes==0.5.3
+
+# Matplotlib for potential visualization (optional)
+matplotlib==3.10.6
