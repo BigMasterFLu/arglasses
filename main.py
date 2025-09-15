@@ -2,6 +2,12 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import pyautogui
+import time
+import os
+
+# Set environment variables for better performance
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow warnings
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN optimizations that might cause issues
 
 # Ensure PyAutoGUI fails safely
 pyautogui.FAILSAFE = True
@@ -9,13 +15,18 @@ pyautogui.FAILSAFE = True
 class FingerTracker:
     def __init__(self):
         self.mp_hands = mp.solutions.hands
+        
+        # Configure MediaPipe with optimized settings for maximum performance
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=2,
-            min_detection_confidence=0.2,  # Even lower threshold for better performance
-            min_tracking_confidence=0.2,   # Lower tracking threshold
-            model_complexity=0            # Use fastest model (0 is fastest, 1 is balanced, 2 is most accurate)
+            min_detection_confidence=0.7,  # Lower for faster detection
+            min_tracking_confidence=0.6,   # Lower for faster tracking
+            model_complexity=0  # Fastest model (0=lite, 1=full, 2=heavy)
         )
+        
+        print("🚀 MediaPipe configured for maximum performance (lite model)")
+        
         # FPS calculation variables
         self.fps_start_time = 0
         self.fps = 0
@@ -39,6 +50,16 @@ class FingerTracker:
         self.last_keyboard_points = None
         self.keyboard_locked = False
         self.key_positions = {}  # Store key positions for hit detection
+        self._showing_thumbs_up = False  # Track thumbs up state
+        self._last_thumbs_up_time = 0  # Cooldown timer for thumbs up
+        
+        # Depth typing variables
+        self.baseline_depth = {}  # Store baseline z-coordinate for each finger
+        self.depth_threshold = 0.02  # How much closer finger needs to be to trigger
+        self.last_key_press_time = {}  # Prevent rapid key presses
+        self.key_press_cooldown = 0.5  # Cooldown between key presses
+        self.is_pressing = False  # Track if currently in a press motion
+        self.last_pressed_key = None  # Track last key to prevent repeats
 
     def calculate_finger_angles(self, landmarks):
         angles = {}
@@ -84,52 +105,36 @@ class FingerTracker:
             self._showing_thumbs_up = False
 
     def check_thumbs_up(self, hand_landmarks):
-        self.__init_thumbs_up_state()
-        
-        # Get relevant landmarks
-        thumb_tip = hand_landmarks.landmark[4]
-        thumb_ip = hand_landmarks.landmark[3]
-        thumb_mcp = hand_landmarks.landmark[2]
-        wrist = hand_landmarks.landmark[0]
-        
-        # Get positions for all finger tips and joints
-        index_tip = hand_landmarks.landmark[8]
-        middle_tip = hand_landmarks.landmark[12]
-        ring_tip = hand_landmarks.landmark[16]
-        pinky_tip = hand_landmarks.landmark[20]
-        
-        index_pip = hand_landmarks.landmark[6]
-        middle_pip = hand_landmarks.landmark[10]
-        ring_pip = hand_landmarks.landmark[14]
-        pinky_pip = hand_landmarks.landmark[18]
-        
-        # Simplified thumb up check
-        thumb_up = (thumb_mcp.y - thumb_tip.y > 0.08 and  # Reduced threshold for upward pointing
-                   abs(thumb_tip.x - thumb_mcp.x) < 0.15)  # More tolerance for vertical alignment
-        
-        # Simplified fingers folded check
-        fingers_folded = (
-            index_tip.y > (index_pip.y - 0.02) and
-            middle_tip.y > (middle_pip.y - 0.02) and
-            ring_tip.y > (ring_pip.y - 0.02) and
-            pinky_tip.y > (pinky_pip.y - 0.02)
-        )
-        
-        current_time = cv2.getTickCount() / cv2.getTickFrequency()
-        
-        # Track thumbs up gesture duration
-        if thumb_up and fingers_folded:
-            if not self._showing_thumbs_up:
-                self._thumbs_up_start_time = current_time
-                self._showing_thumbs_up = True
-                if current_time - self._last_thumbs_up_time > 0.3:  # Reduced delay
-                    self._last_thumbs_up_time = current_time
-                    return True
-        else:
-            if self._showing_thumbs_up:
-                self._showing_thumbs_up = False
-        
-        return False
+        try:
+            # Get relevant landmarks
+            thumb_tip = hand_landmarks.landmark[4]
+            thumb_mcp = hand_landmarks.landmark[2]
+            index_tip = hand_landmarks.landmark[8]
+            middle_tip = hand_landmarks.landmark[12]
+            ring_tip = hand_landmarks.landmark[16]
+            pinky_tip = hand_landmarks.landmark[20]
+            
+            # Check if thumb is pointing up (y position is significantly above MCP)
+            thumb_up = thumb_mcp.y - thumb_tip.y > 0.08
+            
+            # Check if other fingers are folded (all below thumb tip)
+            index_folded = index_tip.y > thumb_tip.y + 0.03
+            middle_folded = middle_tip.y > thumb_tip.y + 0.03
+            ring_folded = ring_tip.y > thumb_tip.y + 0.03
+            pinky_folded = pinky_tip.y > thumb_tip.y + 0.03
+            
+            fingers_folded = index_folded and middle_folded and ring_folded and pinky_folded
+            
+            thumbs_up_detected = thumb_up and fingers_folded
+            
+            # Debug output
+            if thumbs_up_detected:
+                print("👍 Thumbs up detected!")
+            
+            return thumbs_up_detected
+        except Exception as e:
+            print(f"Error in check_thumbs_up: {e}")
+            return False
         
     def get_thumbs_up_duration(self):
         if self._showing_thumbs_up:
@@ -146,6 +151,64 @@ class FingerTracker:
                 point[1] >= y and point[1] <= y + h):
                 return key
         return None
+        
+    def check_depth_typing(self, hand_landmarks, h, w, is_right_hand):
+        """Check if right index finger moved towards screen to type a key (single press)"""
+        if not self.keyboard_visible or not is_right_hand:
+            return
+            
+        current_time = time.time()
+        index_tip = hand_landmarks.landmark[8]
+        
+        # Get finger position on screen
+        finger_x = int(index_tip.x * w)
+        finger_y = int(index_tip.y * h)
+        finger_z = index_tip.z  # Depth coordinate (negative = closer to camera)
+        
+        # Initialize baseline depth if not set for right index finger
+        if 'right_index' not in self.baseline_depth:
+            self.baseline_depth['right_index'] = finger_z
+            return
+            
+        # Check if finger moved significantly towards screen
+        depth_diff = self.baseline_depth['right_index'] - finger_z
+        
+        if depth_diff > self.depth_threshold:
+            # We're in the "pressed" zone
+            if not self.is_pressing:
+                # This is a new press motion
+                self.is_pressing = True
+                
+                # Check which key the finger is over
+                key = self.check_key_press((finger_x, finger_y))
+                
+                if key and key != self.last_pressed_key:
+                    if key not in self.last_key_press_time:
+                        self.last_key_press_time[key] = 0
+                        
+                    # Type the key if cooldown has passed
+                    if (current_time - self.last_key_press_time[key]) > self.key_press_cooldown:
+                        print(f"Right index depth typing: {key}")
+                        # Handle special keys differently
+                        if key == "space":
+                            pyautogui.press("space")
+                        elif key == "backspace":
+                            pyautogui.press("backspace")
+                        elif key == "enter":
+                            pyautogui.press("enter")
+                        else:
+                            pyautogui.press(key.lower())
+                        self.last_key_press_time[key] = current_time
+                        self.last_pressed_key = key
+        else:
+            # We're back to normal depth - reset press state
+            if self.is_pressing:
+                self.is_pressing = False
+                self.last_pressed_key = None
+                print("🔄 Press motion completed - ready for next key")
+                
+        # Update baseline depth slowly to adapt to hand position
+        self.baseline_depth['right_index'] = self.baseline_depth['right_index'] * 0.98 + finger_z * 0.02
 
     def create_keyboard_overlay(self, frame_shape, left_pos, right_pos):
         if self.keyboard_overlay is None or self.keyboard_overlay.shape != frame_shape:
@@ -179,17 +242,20 @@ class FingerTracker:
         width = right_pos[0] - left_pos[0]
         height = right_pos[1] - left_pos[1]
         
-        # Define keyboard layout
+        # Define keyboard layout with special keys
         keyboard_layout = [
             "1234567890",
             "QWERTYUIOP",
             "ASDFGHJKL;",
-            "ZXCVBNM,./"
+            "ZXCVBNM,./",
+            "SPACE|BKSP|ENTER"  # Special keys row
         ]
         
         rows = len(keyboard_layout)
-        cols = len(keyboard_layout[0])
-        key_width = width // cols
+        
+        # Calculate key dimensions for different rows
+        standard_cols = len(keyboard_layout[0])  # Use first row as standard
+        key_width = width // standard_cols
         key_height = height // rows
         
         # Draw horizontal lines
@@ -197,51 +263,71 @@ class FingerTracker:
             y = left_pos[1] + (i * key_height)
             cv2.line(self.keyboard_overlay, (left_pos[0], y), (right_pos[0], y), (200, 150, 50), 1)
         
-        # Draw vertical lines and keys
-        for i in range(cols + 1):
+        # Draw vertical lines for standard rows
+        for i in range(standard_cols + 1):
             x = left_pos[0] + (i * key_width)
-            cv2.line(self.keyboard_overlay, (x, left_pos[1]), (x, right_pos[1]), (200, 150, 50), 1)
+            cv2.line(self.keyboard_overlay, (x, left_pos[1]), (x, left_pos[1] + (rows - 1) * key_height), (200, 150, 50), 1)
         
         # Add letters and store key positions
         font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = min(key_width, key_height) * 0.03  # Adjust font size based on key size
+        font_scale = min(key_width, key_height) * 0.025
         font_thickness = 1
         font_color = (255, 255, 255)  # White text
         
         for row in range(rows):
-            for col in range(cols):
-                x = left_pos[0] + (col * key_width)
-                y = left_pos[1] + (row * key_height)
+            if row < rows - 1:  # Standard rows (0-3)
+                current_row = keyboard_layout[row]
+                cols = len(current_row)
                 
-                # Store key position
-                key = keyboard_layout[row][col]
-                self.key_positions[key] = (x, y, key_width, key_height)
+                for col in range(cols):
+                    x = left_pos[0] + (col * key_width)
+                    y = left_pos[1] + (row * key_height)
+                    
+                    # Store key position
+                    key = current_row[col]
+                    self.key_positions[key] = (x, y, key_width, key_height)
+                    
+                    # Draw key text
+                    text_x = x + (key_width // 3)
+                    text_y = y + (key_height * 2 // 3)
+                    cv2.putText(self.keyboard_overlay, key, 
+                              (text_x, text_y), font, font_scale, font_color, font_thickness)
+            else:  # Special keys row (row 4)
+                special_keys = keyboard_layout[row].split('|')
+                special_key_width = width // len(special_keys)
                 
-                # Check if key was recently pressed
-                current_time = cv2.getTickCount() / cv2.getTickFrequency()
-                key_dark = False
-                if key in self.pressed_keys:
-                    time_since_press = current_time - self.pressed_keys[key]
-                    if time_since_press < 1.0:  # Darken effect lasts for 1 second
-                        key_dark = True
-                        # Create darker background for pressed key
-                        key_rect = np.array([
-                            [x, y],
-                            [x + key_width, y],
-                            [x + key_width, y + key_height],
-                            [x, y + key_height]
-                        ], np.int32)
-                        cv2.fillPoly(self.keyboard_overlay, [key_rect], (50, 30, 0))  # Darker blue
+                for i, special_key in enumerate(special_keys):
+                    x = left_pos[0] + (i * special_key_width)
+                    y = left_pos[1] + (row * key_height)
+                    
+                    # Draw vertical lines for special keys
+                    if i < len(special_keys):
+                        line_x = x + special_key_width
+                        cv2.line(self.keyboard_overlay, (line_x, y), (line_x, y + key_height), (200, 150, 50), 1)
+                    
+                    # Map special key names to actual keys
+                    if special_key == "SPACE":
+                        actual_key = "space"
+                        display_text = "SPACE"
+                    elif special_key == "BKSP":
+                        actual_key = "backspace"
+                        display_text = "⌫"
+                    elif special_key == "ENTER":
+                        actual_key = "enter"
+                        display_text = "↵"
                     else:
-                        # Remove old key presses
-                        del self.pressed_keys[key]
-
-                # Draw key text
-                text_x = x + (key_width // 3)
-                text_y = y + (key_height * 2 // 3)
-                text_color = (150, 150, 150) if key_dark else font_color  # Dimmer text when key is dark
-                cv2.putText(self.keyboard_overlay, key, 
-                          (text_x, text_y), font, font_scale, text_color, font_thickness)
+                        actual_key = special_key
+                        display_text = special_key
+                    
+                    # Store key position
+                    self.key_positions[actual_key] = (x, y, special_key_width, key_height)
+                    
+                    # Draw key text (centered for special keys)
+                    text_size = cv2.getTextSize(display_text, font, font_scale, font_thickness)[0]
+                    text_x = x + (special_key_width - text_size[0]) // 2
+                    text_y = y + (key_height + text_size[1]) // 2
+                    cv2.putText(self.keyboard_overlay, display_text, 
+                              (text_x, text_y), font, font_scale, font_color, font_thickness)
         
         # Add lock status indicator
         lock_text = "LOCKED" if self.keyboard_locked else "UNLOCKED"
@@ -254,7 +340,7 @@ class FingerTracker:
 
 
     def process_frame(self, frame):
-        # Convert the BGR image to RGB
+        # Convert the BGR image to RGB for MediaPipe (no resizing for simplicity)
         image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.hands.process(image_rgb)
         
@@ -347,64 +433,61 @@ class FingerTracker:
                     self.keyboard_overlay = None
                     self.last_keyboard_points = None
                 
-            # Check for thumbs up to lock/unlock keyboard - only check the first detected hand
+            # Check for thumbs up to lock/unlock keyboard with cooldown
             if results.multi_hand_landmarks and len(results.multi_hand_landmarks) > 0:
+                current_time = time.time()
                 if self.check_thumbs_up(results.multi_hand_landmarks[0]):
-                    self.keyboard_locked = not self.keyboard_locked
-                    if self.keyboard_overlay is not None and self.last_keyboard_points is not None:
-                        # Get the correct points for keyboard recreation
-                        left_pos = (self.last_keyboard_points[0][0], self.last_keyboard_points[0][1])
-                        right_pos = (self.last_keyboard_points[2][0], self.last_keyboard_points[2][1])  # Use correct coordinates
+                    # Only toggle if enough time has passed since last toggle (1 second cooldown)
+                    if current_time - self._last_thumbs_up_time > 1.0:
+                        self.keyboard_locked = not self.keyboard_locked
+                        self._last_thumbs_up_time = current_time
+                        status = "LOCKED" if self.keyboard_locked else "UNLOCKED"
+                        print(f"Keyboard {status}")
                         
-                        # Create keyboard with correct dimensions
-                        self.keyboard_overlay = self.create_keyboard_overlay(
-                            frame.shape,
-                            left_pos,
-                            right_pos
-                        )
+                        if self.keyboard_overlay is not None and self.last_keyboard_points is not None:
+                            # Get the correct points for keyboard recreation
+                            left_pos = (self.last_keyboard_points[0][0], self.last_keyboard_points[0][1])
+                            right_pos = (self.last_keyboard_points[2][0], self.last_keyboard_points[2][1])
+                            
+                            # Create keyboard with correct dimensions
+                            self.keyboard_overlay = self.create_keyboard_overlay(
+                                frame.shape,
+                                left_pos,
+                                right_pos
+                            )
                     
-            # Check for key presses if keyboard is visible and locked
-            if self.keyboard_visible and self.keyboard_locked and not self.right_pinch and not self.left_pinch:
-                for hand_landmarks in results.multi_hand_landmarks:
-                    index_tip = hand_landmarks.landmark[8]
+            # Check for depth-based typing if keyboard is visible (right hand only)
+            if self.keyboard_visible and not self.right_pinch and not self.left_pinch:
+                for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                    # Determine if this is the right hand
+                    is_right_hand = results.multi_handedness[idx].classification[0].label == "Right"
                     h, w, _ = frame.shape
-                    index_point = (int(index_tip.x * w), int(index_tip.y * h))
-                    
-                    # Check if index finger is touching a key
-                    key = self.check_key_press(index_point)
-                    if key:
-                        current_time = cv2.getTickCount() / cv2.getTickFrequency()
-                        # Check if enough time has passed since last press of this key
-                        can_press = True
-                        if key in self.pressed_keys:
-                            time_since_press = current_time - self.pressed_keys[key]
-                            if time_since_press < self.key_press_delay:
-                                can_press = False
-                        
-                        if can_press:
-                            # Store the press time
-                            self.pressed_keys[key] = current_time
-                            # Simulate key press
-                            pyautogui.press(key.lower())
+                    # Use depth-based typing only for right hand
+                    self.check_depth_typing(hand_landmarks, h, w, is_right_hand)
         
         return frame
 
     def run(self):
         cap = cv2.VideoCapture(0)
         
-        # Set camera properties for 60 FPS
+        # Optimize camera settings for performance
         cap.set(cv2.CAP_PROP_FPS, 60)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))  # Use MJPG for better performance
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer to minimize latency
         
         # Set the window size
         cv2.namedWindow('Finger Tracking', cv2.WINDOW_NORMAL)
-        cv2.resizeWindow('Finger Tracking', 2560, 1440)
+        cv2.resizeWindow('Finger Tracking', 1300, 800)
         
-        # Variables for FPS control
+        # Variables for FPS control and optimization
         fps_target = 60.0
         frame_time = 1.0 / fps_target
+        skip_frame_count = 0
+        frame_skip_interval = 1  # Process every frame for better responsiveness
+        
+        print("🎯 Camera optimized for high performance - targeting 60 FPS")
         
         while True:
             frame_start = cv2.getTickCount()
@@ -417,8 +500,14 @@ class FingerTracker:
             # Flip the frame horizontally
             frame = cv2.flip(frame, 1)
             
-            # Process the frame
-            processed_frame = self.process_frame(frame)
+            # Skip frame processing for performance if needed
+            skip_frame_count += 1
+            if skip_frame_count >= frame_skip_interval:
+                skip_frame_count = 0
+                # Process the frame
+                processed_frame = self.process_frame(frame)
+            else:
+                processed_frame = frame
             
             # If keyboard was previously visible and we have saved points, show it
             if self.keyboard_visible and self.last_keyboard_points is not None:
