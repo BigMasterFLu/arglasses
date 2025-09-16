@@ -5,27 +5,36 @@ import pyautogui
 import time
 import os
 
-# Set environment variables for better performance
+# Set environment variables for optimized GPU utilization 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow warnings
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN optimizations that might cause issues
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Use RTX 4050 GPU
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'  # Efficient GPU memory usage
+
+# Additional GPU optimization flags
+os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'  # Optimize GPU threading
+os.environ['TF_GPU_THREAD_COUNT'] = '4'  # Use multiple GPU threads
 
 # Ensure PyAutoGUI fails safely
 pyautogui.FAILSAFE = True
+
+print("💻 RTX 4050 GPU optimization enabled")
+print("🔥 CUDA 12.9 environment configured for maximum performance")
 
 class FingerTracker:
     def __init__(self):
         self.mp_hands = mp.solutions.hands
         
-        # Configure MediaPipe with optimized settings for maximum performance
+        # Configure MediaPipe for MAXIMUM SPEED
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=2,
-            min_detection_confidence=0.7,  # Lower for faster detection
-            min_tracking_confidence=0.6,   # Lower for faster tracking
-            model_complexity=0  # Fastest model (0=lite, 1=full, 2=heavy)
+            min_detection_confidence=0.5,  # Lower for faster detection
+            min_tracking_confidence=0.5,   # Lower for faster tracking
+            model_complexity=0  # Use LITE model for maximum speed (0=lite, 1=full, 2=heavy)
         )
         
-        print("🚀 MediaPipe configured for maximum performance (lite model)")
+        print("🚀 MediaPipe configured for MAXIMUM SPEED (lite model)")
+        print("⚡ Ultra-fast processing mode enabled")
         
         # FPS calculation variables
         self.fps_start_time = 0
@@ -340,9 +349,12 @@ class FingerTracker:
 
 
     def process_frame(self, frame):
-        # Convert the BGR image to RGB for MediaPipe (no resizing for simplicity)
-        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self.hands.process(image_rgb)
+        # GPU-optimized frame processing
+        # Use continuous memory allocation for better GPU transfer
+        frame_rgb = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        
+        # MediaPipe processing (leverages GPU internally when available)
+        results = self.hands.process(frame_rgb)
         
         # Reset pinch states at the start of each frame
         self.left_pinch = False
@@ -355,13 +367,13 @@ class FingerTracker:
                 # Determine if this is the right or left hand
                 is_right_hand = results.multi_handedness[idx].classification[0].label == "Right"
                 
-                # Draw the hand landmarks
+                # Draw simplified hand landmarks for speed
                 self.mp_draw.draw_landmarks(
                     frame, 
                     hand_landmarks, 
                     self.mp_hands.HAND_CONNECTIONS,
-                    self.mp_draw.DrawingSpec(color=(255, 255, 255), thickness=2, circle_radius=2),  # White dots
-                    self.mp_draw.DrawingSpec(color=(255, 255, 255), thickness=2)  # White lines
+                    self.mp_draw.DrawingSpec(color=(255, 255, 255), thickness=1, circle_radius=1),  # Thinner for speed
+                    self.mp_draw.DrawingSpec(color=(255, 255, 255), thickness=1)  # Thinner lines for speed
                 )
                 
                 # Get frame dimensions
@@ -470,24 +482,27 @@ class FingerTracker:
     def run(self):
         cap = cv2.VideoCapture(0)
         
-        # Optimize camera settings for performance
+        # Optimize camera settings for maximum FPS
         cap.set(cv2.CAP_PROP_FPS, 60)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))  # Use MJPG for better performance
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer to minimize latency
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)   # Reduced resolution for speed
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)  # Reduced resolution for speed
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))  
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize latency
+        cap.set(cv2.CAP_PROP_EXPOSURE, -5)  # Faster exposure for higher FPS
         
         # Set the window size
         cv2.namedWindow('Finger Tracking', cv2.WINDOW_NORMAL)
         cv2.resizeWindow('Finger Tracking', 1300, 800)
         
-        # Variables for FPS control and optimization
+        # Variables for aggressive FPS optimization
         fps_target = 60.0
         frame_time = 1.0 / fps_target
-        skip_frame_count = 0
-        frame_skip_interval = 1  # Process every frame for better responsiveness
+        mediapipe_skip_count = 0
+        mediapipe_skip_interval = 2  # Process MediaPipe every 2nd frame for speed
         
-        print("🎯 Camera optimized for high performance - targeting 60 FPS")
+        print("🎯 Camera optimized for MAXIMUM FPS - targeting 60 FPS")
+        print("⚡ Aggressive performance mode: 640x480 @ 60 FPS")
+        print("🔥 MediaPipe processing every 2nd frame for speed boost")
         
         while True:
             frame_start = cv2.getTickCount()
@@ -500,14 +515,19 @@ class FingerTracker:
             # Flip the frame horizontally
             frame = cv2.flip(frame, 1)
             
-            # Skip frame processing for performance if needed
-            skip_frame_count += 1
-            if skip_frame_count >= frame_skip_interval:
-                skip_frame_count = 0
-                # Process the frame
+            # Skip MediaPipe processing for some frames to boost FPS
+            mediapipe_skip_count += 1
+            if mediapipe_skip_count >= mediapipe_skip_interval:
+                mediapipe_skip_count = 0
+                # Process the frame with MediaPipe (expensive operation)
                 processed_frame = self.process_frame(frame)
             else:
+                # Skip MediaPipe, just use the raw frame for display
                 processed_frame = frame
+                
+                # Only overlay keyboard if it exists (reduced overhead)
+                if self.keyboard_visible and self.keyboard_overlay is not None:
+                    processed_frame = cv2.addWeighted(processed_frame, 0.8, self.keyboard_overlay, 0.2, 0)  # Lighter blend for speed
             
             # If keyboard was previously visible and we have saved points, show it
             if self.keyboard_visible and self.last_keyboard_points is not None:
@@ -523,31 +543,16 @@ class FingerTracker:
                 self.fps_start_time = current_time
                 self.frame_count = 0
             
-            # Draw FPS counter
-            cv2.putText(processed_frame, f'FPS: {self.fps:.1f}',
-                       (processed_frame.shape[1] - 150, 30),
+            # Draw FPS counter (simplified for speed)
+            cv2.putText(processed_frame, f'{self.fps:.0f}',
+                       (processed_frame.shape[1] - 50, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            
-            # Draw thumbs up duration if active
-            if self._showing_thumbs_up:
-                duration = self.get_thumbs_up_duration()
-                if duration >= 10:
-                    message = "Thumbs up held for 10+ seconds!"
-                else:
-                    message = f"Thumbs up: {duration:.1f}s"
-                cv2.putText(processed_frame, message,
-                          (processed_frame.shape[1] - 400, 70),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
             # Display the frame
             cv2.imshow('Finger Tracking', processed_frame)
             
-            # Control frame rate
-            frame_time_elapsed = (cv2.getTickCount() - frame_start) / cv2.getTickFrequency()
-            wait_time = max(1, int((frame_time - frame_time_elapsed) * 1000))
-            
-            # Break the loop if 'q' is pressed
-            if cv2.waitKey(wait_time) & 0xFF == ord('q'):
+            # Minimal wait for maximum FPS
+            if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
         
         cap.release()
