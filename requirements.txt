@@ -1,34 +1,29 @@
-# Hand Tracking Virtual Keyboard Requirements
-# Core dependencies for MediaPipe hand tracking with virtual keyboard
+# Hand Tracking Virtual Keyboard - Clean Requirements
+# Conflict-free dependencies for the hand tracking application
 
-# Computer Vision and MediaPipe
-opencv-contrib-python==4.10.0.84
-mediapipe==0.10.21
+# Core computer vision and hand tracking
+opencv-python==4.10.0.84
+mediapipe==0.10.9
 
-# Numerical computing
-numpy==1.26.0
+# Numerical computing (compatible with MediaPipe's TensorFlow backend)
+numpy==1.24.3
 
-# GUI automation for virtual keyboard
+# GUI automation for virtual keyboard functionality
 PyAutoGUI==0.9.54
 
-# TensorFlow (required by MediaPipe)
-tensorflow==2.13.1
+# Additional dependencies will be automatically installed by MediaPipe:
+# - absl-py (Google's Python common libraries)
+# - attrs (classes without boilerplate)
+# - flatbuffers (serialization library)
+# - matplotlib (plotting library)
+# - opencv-contrib-python (extended OpenCV functionality)
+# - protobuf (protocol buffers)
+# - sounddevice (audio I/O)
+# - pillow (image processing)
+# - and other supporting libraries
 
-# Additional dependencies for MediaPipe and TensorFlow
-absl-py==2.3.1
-attrs==25.3.0
-protobuf==4.25.8
-flatbuffers==25.2.10
-
-# JAX (required by newer MediaPipe)
-jax==0.7.1
-jaxlib==0.7.1
-
-# Audio support for MediaPipe
-sounddevice==0.5.2
-
-# ML data types
-ml_dtypes==0.5.3
-
-# Matplotlib for potential visualization (optional)
-matplotlib==3.10.6
+# Installation instructions:
+# 1. Create virtual environment: python -m venv venv
+# 2. Activate environment: .\venv\Scripts\Activate.ps1 (Windows) or source venv/bin/activate (Linux/Mac)
+# 3. Install dependencies: pip install -r requirements.txt
+# 4. Run application: python main.py
